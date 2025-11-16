@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="es">
+    <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jigsaw Rules - UI</title>
+    <link rel="stylesheet" href="/static/styles.css">
+      <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+  </head>
+  <body>
+    <main class="container">
+      <header class="header card">
+        <div>
+          <h1>Jigsaw Community Rules</h1>
+          <p class="lead">Clasificación automática de violaciones</p>
+        </div>
+        <div class="header-actions">
+          <label for="modelSelect" class="small">Modelo</label>
+          <select id="modelSelect"></select>
+        </div>
+      </header>
+
+      <nav class="tabs card" role="tablist">
+        <button class="tab active" data-tab="overview">Resumen</button>
+        <button class="tab" data-tab="comparison">Comparación</button>
+        <button class="tab" data-tab="predict">Predicción</button>
+        <button class="tab" data-tab="performance">Rendimiento</button>
+      </nav>
+
+      <section id="content">
+        <!-- dynamic content rendered by app.js -->
+      </section>
+    </main>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>
