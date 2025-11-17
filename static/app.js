@@ -4,13 +4,13 @@ const content = document.getElementById('content');
 // dynamic data containers filled from /models
 let availableModels = [];
 let modelsMetadata = {};
-// modelsData maps registryKey -> { displayName, f1, accuracy, precision, recall, auc, color, description, classes, confusion_matrix }
+// modelsData maps registryKey -> { displayName, f1, accuracy, precision, recall, auc, mcc, color, description, classes, confusion_matrix }
 let modelsData = {};
 
 // pleasant color palette for models (fallback if metadata has no color)
 const PALETTE = ['#4f46e5','#f59e0b','#14b8a6','#8b5cf6','#ef4444','#0ea5e9','#10b981','#f97316'];
 // metric theme colors
-const METRIC_COLORS = { f1:'#1F6FEB', accuracy:'#00C2C7', precision:'#F39C12', recall:'#6B6FD6', auc:'#C51A64' };
+const METRIC_COLORS = { f1:'#1F6FEB', accuracy:'#00C2C7', precision:'#F39C12', recall:'#6B6FD6', auc:'#C51A64', mcc:'#10b981' };
 let donutMetric = 'f1';
 let RESULT_COUNTER = 0;
 
@@ -50,7 +50,7 @@ async function loadModels(){
       const met = md.metrics || md;
       const fallbackColor = PALETTE[idx % PALETTE.length];
       // populate if we have any metric info or at least metadata
-      if(met && (met.f1 !== undefined || met.accuracy !== undefined || met.precision !== undefined || met.recall !== undefined || met.auc !== undefined || md)){
+      if(met && (met.f1 !== undefined || met.accuracy !== undefined || met.precision !== undefined || met.recall !== undefined || met.auc !== undefined || met.mcc !== undefined || md)){
         const cm = (met.confusion_matrix ?? met.confusionMatrix ?? md.confusion_matrix ?? md.confusionMatrix ?? modelsData[name]?.confusion_matrix ?? null);
         // derive missing metrics from confusion matrix if possible (format [[TN,FP],[FN,TP]])
         let derived = {};
@@ -64,16 +64,21 @@ async function loadModels(){
           const recallCalc = TP + FN > 0 ? TP/(TP+FN) : 0;
           const accuracyCalc = total > 0 ? (TP+TN)/total : 0;
           const f1Calc = (precisionCalc+recallCalc)>0 ? (2*precisionCalc*recallCalc)/(precisionCalc+recallCalc) : 0;
-          derived = {precisionCalc, recallCalc, accuracyCalc, f1Calc};
+          const mccDen = Math.sqrt((TP+FP)*(TP+FN)*(TN+FP)*(TN+FN));
+          const mccCalc = mccDen>0 ? ((TP*TN - FP*FN)/mccDen) : 0;
+          derived = {precisionCalc, recallCalc, accuracyCalc, f1Calc, mccCalc};
         }
         // soportar claves alternativas para accuracy (acc, Accuracy)
         const accValue = (met.accuracy ?? met.acc ?? met.Accuracy ?? modelsData[name]?.accuracy ?? derived.accuracyCalc ?? 0);
+        // soportar clave para mcc
+        const mccValue = (met.mcc ?? met.MCC ?? modelsData[name]?.mcc ?? derived.mccCalc ?? 0);
         modelsData[name] = {
           f1: (met.f1 ?? modelsData[name]?.f1 ?? derived.f1Calc ?? 0),
           accuracy: accValue,
           precision: (met.precision ?? modelsData[name]?.precision ?? derived.precisionCalc ?? 0),
           recall: (met.recall ?? modelsData[name]?.recall ?? derived.recallCalc ?? 0),
           auc: (met.auc ?? modelsData[name]?.auc ?? 0),
+          mcc: mccValue,
           color: (md.color ?? modelsData[name]?.color ?? fallbackColor),
           description: (md.description ?? modelsData[name]?.description ?? ''),
           classes: (met.classes ?? md.classes ?? modelsData[name]?.classes ?? []),
@@ -86,7 +91,8 @@ async function loadModels(){
           accuracy: modelsData[name].accuracy,
           precision: modelsData[name].precision,
           recall: modelsData[name].recall,
-          auc: modelsData[name].auc
+          auc: modelsData[name].auc,
+          mcc: modelsData[name].mcc
         });
       }
     });
@@ -291,7 +297,8 @@ function renderComparison(){
       el('div',{class:'donut-mini',id:'avgAcc'}),
       el('div',{class:'donut-mini',id:'avgPrec'}),
       el('div',{class:'donut-mini',id:'avgRec'}),
-      el('div',{class:'donut-mini',id:'avgAuc'})
+      el('div',{class:'donut-mini',id:'avgAuc'}),
+      el('div',{class:'donut-mini',id:'avgMCC'})
     ])
   ]);
   grid.appendChild(donutPanel);
@@ -331,6 +338,17 @@ function renderComparison(){
   content.appendChild(grid);
 
   // Build charts
+  const metricVal = (d, key)=>{
+    let v = d && d[key];
+    if(v === undefined || v === null) return 0;
+    if(typeof v === 'string'){
+      const s = v.trim();
+      if(s.endsWith('%')) v = parseFloat(s)/100; else v = parseFloat(s);
+    }
+    if(!isFinite(v) || isNaN(v)) return 0;
+    if(v > 1) v = v/100; if(v < 0) v = 0; if(v > 1) v = 1;
+    return v;
+  };
   const metrics = ['f1','accuracy','precision','recall','auc'];
   const metricNames = {'f1':'F1','accuracy':'Accuracy','precision':'Precision','recall':'Recall','auc':'AUC'};
   const modelOrder = Object.entries(modelsData)
@@ -338,7 +356,7 @@ function renderComparison(){
     .map(([name])=>name);
   const traces = metrics.map(m => ({
     x: modelOrder,
-    y: modelOrder.map(name => (modelsData[name] && modelsData[name][m]) ? +(modelsData[name][m]*100).toFixed(2) : 0),
+    y: modelOrder.map(name => +(metricVal(modelsData[name], m)*100).toFixed(2)),
     name: metricNames[m],
     type: 'bar',
     marker:{color: METRIC_COLORS[m]}
@@ -348,7 +366,7 @@ function renderComparison(){
   const theta = ['Precision','Recall','F1','Accuracy','AUC'];
   const radarTraces = modelOrder.map(name => ({
     type: 'scatterpolar',
-    r: [modelsData[name].precision, modelsData[name].recall, modelsData[name].f1, modelsData[name].accuracy, modelsData[name].auc].map(v=>v||0),
+    r: [metricVal(modelsData[name],'precision'), metricVal(modelsData[name],'recall'), metricVal(modelsData[name],'f1'), metricVal(modelsData[name],'accuracy'), metricVal(modelsData[name],'auc')],
     theta: theta,
     fill: 'toself',
     name: name,
@@ -363,9 +381,10 @@ function renderComparison(){
   buildDonutSmall('avgPrec','Precision', avg('precision'), METRIC_COLORS.precision);
   buildDonutSmall('avgRec','Recall', avg('recall'), METRIC_COLORS.recall);
   buildDonutSmall('avgAuc','AUC', avg('auc'), METRIC_COLORS.auc);
+  buildDonutSmall('avgMCC','MCC', avg('mcc'), METRIC_COLORS.mcc);
 
   // Heatmap models x metrics
-  buildModelsMetricsHeatmap('mmHeat', modelOrder, metrics, metricNames, 520);
+  buildModelsMetricsHeatmap('mmHeat', modelOrder, metrics, metricNames, 520, metricVal);
 
   // Ranking horizontal por F1
   buildRankingBar('rankF1', modelOrder, 'f1', '#00C2C7');
@@ -373,12 +392,13 @@ function renderComparison(){
   // handler to update charts by selected metric and avoid blue for F1
   const sel = document.getElementById('rankMetricSelect');
   sel.addEventListener('change', ()=>{
-    updateComparisonCharts(sel.value, metrics, metricNames);
+    updateComparisonCharts(sel.value, metrics, metricNames, metricVal);
   });
 }
 
-function buildModelsMetricsHeatmap(containerId, modelNames, metrics, metricNames, height){
-  const z = modelNames.map(name => metrics.map(m => (modelsData[name] && modelsData[name][m]) ? +(modelsData[name][m]) : 0));
+function buildModelsMetricsHeatmap(containerId, modelNames, metrics, metricNames, height, metricVal){
+  const getter = metricVal || ((d,k)=> (d && d[k]) ? d[k] : 0);
+  const z = modelNames.map(name => metrics.map(m => getter(modelsData[name], m)));
   const data = [{
     z: z,
     x: metrics.map(m=>metricNames[m]),
@@ -407,14 +427,14 @@ function buildRankingBar(containerId, modelOrder, metric, barColor){
   Plotly.newPlot(containerId, data, layout, {displayModeBar:false,responsive:true});
 }
 
-function updateComparisonCharts(metric, metrics, metricNames){
+function updateComparisonCharts(metric, metrics, metricNames, metricVal){
   const modelOrder = Object.entries(modelsData)
     .sort((a,b)=> (b[1][metric]||0) - (a[1][metric]||0))
     .map(([name])=>name);
   // grouped bars
   const traces = metrics.map(m => ({
     x: modelOrder,
-    y: modelOrder.map(name => (modelsData[name] && modelsData[name][m]) ? +(modelsData[name][m]*100).toFixed(2) : 0),
+    y: modelOrder.map(name => +( (metricVal ? metricVal(modelsData[name], m) : (modelsData[name] && modelsData[name][m]) || 0) *100 ).toFixed(2)),
     name: metricNames[m],
     type: 'bar',
     marker:{color: METRIC_COLORS[m]}
@@ -425,7 +445,7 @@ function updateComparisonCharts(metric, metrics, metricNames){
   const theta = ['Precision','Recall','F1','Accuracy','AUC'];
   const radarTraces = modelOrder.map(name => ({
     type: 'scatterpolar',
-    r: [modelsData[name].precision, modelsData[name].recall, modelsData[name].f1, modelsData[name].accuracy, modelsData[name].auc].map(v=>v||0),
+    r: [metricVal(modelsData[name],'precision'), metricVal(modelsData[name],'recall'), metricVal(modelsData[name],'f1'), metricVal(modelsData[name],'accuracy'), metricVal(modelsData[name],'auc')],
     theta: theta,
     fill: 'toself',
     name: name,
@@ -435,7 +455,7 @@ function updateComparisonCharts(metric, metrics, metricNames){
   Plotly.react('radarChart', radarTraces, {polar:{radialaxis:{range:[0,1],tickformat:'.0%'}}, margin:{t:30}});
 
   // heatmap
-  const z = modelOrder.map(name => metrics.map(m => (modelsData[name] && modelsData[name][m]) ? +(modelsData[name][m]) : 0));
+  const z = modelOrder.map(name => metrics.map(m => metricVal(modelsData[name], m)));
   const hmData = [{ z, x: metrics.map(m=>metricNames[m]), y: modelOrder, type:'heatmap', zmin:0, zmax:1, colorscale: [[0,'#e2e8f0'],[1,'#1F6FEB']], showscale:true }];
   Plotly.react('mmHeat', hmData, {height:520, margin:{l:120,r:30,t:10,b:60}, paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'#fff', xaxis:{tickangle:0}, yaxis:{automargin:true}});
 
@@ -462,7 +482,7 @@ function generateComparisonHTML(){
 
 function renderPredict(){
   const area = el('div',{class:'card'},[
-    el('h3',{},['Predicción en Tiempo Real']),
+    el('h3',{},['Predicción']),
     el('label',{},['Ingrese texto']),
     el('textarea',{id:'inputText',rows:6,style:'width:100%;padding:12px;border-radius:8px;border:1px solid #eef2ff'},[]),
     el('div',{style:'display:flex;gap:12px;align-items:center'},[

@@ -12,6 +12,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from transformers import AutoTokenizer
+from sklearn.metrics import roc_auc_score
+import csv
 
 # -----------------------------------------------------------
 # PATHS
@@ -159,9 +161,123 @@ def safe_load_models():
     print("\nModelos cargados:", list(MODEL_REGISTRY.keys()))
     print("=== FIN CARGA ===")
 
+def _read_val_dataset():
+    """Carga textos y etiquetas desde data/val_model.csv si existe.
+    Devuelve (texts, labels) o (None, None) cuando no está disponible.
+    """
+    val_path = BASE_DIR / "data" / "val_model.csv"
+    if not val_path.exists():
+        return None, None
+    texts, labels = [], []
+    try:
+        with val_path.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            text_col = None
+            label_col = None
+            if reader.fieldnames:
+                for c in reader.fieldnames:
+                    lc = c.lower()
+                    if text_col is None and ("clean_body" in lc or lc == "text" or lc == "body"):
+                        text_col = c
+                    if label_col is None and ("rule_violation" in lc or lc == "label" or lc == "target" or lc == "y"):
+                        label_col = c
+            for row in reader:
+                t = (row.get(text_col) or "").strip()
+                y = row.get(label_col, None)
+                if t == "" or y is None:
+                    continue
+                try:
+                    labels.append(int(float(y)))
+                    texts.append(t)
+                except Exception:
+                    continue
+        if not texts:
+            return None, None
+        return texts, labels
+    except Exception:
+        return None, None
+
+def _tf_prob_pos_batch(fn, tokenizer, input_keys, seq_len, texts):
+    """Devuelve la probabilidad de la clase positiva para un batch de textos."""
+    if not texts:
+        return []
+    if seq_len is not None:
+        enc = tokenizer(texts, return_tensors="tf", padding="max_length", truncation=True, max_length=seq_len)
+    else:
+        enc = tokenizer(texts, return_tensors="tf", padding=True, truncation=True)
+    enc_dict = {k: v for k, v in enc.items()}
+    inputs_tf = {k: enc_dict[k] for k in input_keys if k in enc_dict}
+    outputs = fn(**inputs_tf)
+    if "logits" in outputs:
+        raw = outputs["logits"].numpy()
+    else:
+        raw = list(outputs.values())[0].numpy()
+    raw = np.array(raw)
+    if raw.ndim == 1:
+        v = raw
+        probs_pos = tf.sigmoid(v).numpy()
+        return probs_pos.tolist()
+    if raw.ndim == 2 and raw.shape[1] == 1:
+        v = raw[:, 0]
+        probs_pos = tf.sigmoid(v).numpy()
+        return probs_pos.tolist()
+    # softmax: tomar columna 1 como clase positiva
+    sm = tf.nn.softmax(raw, axis=-1).numpy()
+    if sm.shape[1] == 1:
+        return sm[:, 0].tolist()
+    return sm[:, 1].tolist()
+
+def ensure_auc_for_models():
+    """Si falta AUC en metadata, lo calcula usando val_model.csv."""
+    texts, labels = _read_val_dataset()
+    if not texts or not labels:
+        return
+    labels_arr = np.array(labels)
+    for name, info in MODEL_REGISTRY.items():
+        md = MODEL_METADATA.get(name) or {}
+        metrics = md.get("metrics", md)
+        if metrics.get("auc") is not None:
+            continue
+        try:
+            if info["type"] == "tensorflow":
+                probs = []
+                bs = 64
+                for i in range(0, len(texts), bs):
+                    batch = texts[i:i+bs]
+                    probs.extend(_tf_prob_pos_batch(info["model"], info["tokenizer"], info["input_keys"], info["seq_len"], batch))
+                auc = float(roc_auc_score(labels_arr, np.array(probs)))
+            elif info["type"] == "sklearn":
+                m = info["model"]
+                if hasattr(m, "decision_function"):
+                    scores = m.decision_function(texts)
+                    scores = 1 / (1 + np.exp(-np.array(scores)))
+                    auc = float(roc_auc_score(labels_arr, scores))
+                elif hasattr(m, "predict_proba"):
+                    probs = m.predict_proba(texts)
+                    probs = np.array(probs)
+                    if probs.ndim == 2:
+                        pos = probs[:, -1]
+                    else:
+                        pos = probs.ravel()
+                    auc = float(roc_auc_score(labels_arr, pos))
+                else:
+                    continue
+            else:
+                continue
+            if "metrics" in md:
+                md["metrics"]["auc"] = auc
+            else:
+                md["auc"] = auc
+            MODEL_METADATA[name] = md
+            print(f"   ✓ AUC calculado para {name}: {auc:.4f}")
+        except Exception as e:
+            print(f"   ✗ No se pudo calcular AUC para {name}: {e}")
+
 @app.on_event("startup")
 def startup_event():
     safe_load_models()
+    # Calcular AUC si falta, usando el conjunto de validación
+    ensure_auc_for_models()
 
 # -----------------------------------------------------------
 # PREDICCIÓN SKLEARN (versión robusta que usabas antes)
