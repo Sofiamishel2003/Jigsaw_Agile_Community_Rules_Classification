@@ -4,6 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Jigsaw Rules - UI</title>
+    <!-- Typography: modern, legible font for nicer headings -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css">
       <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
   </head>
@@ -11,7 +15,7 @@
     <main class="container">
       <header class="header card">
         <div>
-          <h1>Jigsaw Community Rules</h1>
+          <h1 class="brand-title">Jigsaw Community Rules</h1>
           <p class="lead">Clasificación automática de violaciones</p>
         </div>
         <div class="header-actions">
@@ -24,7 +28,6 @@
         <button class="tab active" data-tab="overview">Resumen</button>
         <button class="tab" data-tab="comparison">Comparación</button>
         <button class="tab" data-tab="predict">Predicción</button>
-        <button class="tab" data-tab="performance">Rendimiento</button>
       </nav>
 
       <section id="content">
