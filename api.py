@@ -1,158 +1,167 @@
-from pathlib import Path
 import json
 import traceback
+from pathlib import Path
 from typing import Dict, Any, Optional
 
 import joblib
 import numpy as np
+import tensorflow as tf
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from transformers import AutoTokenizer
 
+# -----------------------------------------------------------
+# PATHS
+# -----------------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent
-MODELS_DIR = BASE_DIR / 'models'
-STATIC_DIR = BASE_DIR / 'static'
+MODELS_DIR = BASE_DIR / "models"
+STATIC_DIR = BASE_DIR / "static"
 
+# -----------------------------------------------------------
+# REQUEST MODEL
+# -----------------------------------------------------------
 
 class PredictRequest(BaseModel):
     text: str
     model: Optional[str] = None
 
+# -----------------------------------------------------------
+# FASTAPI APP INIT
+# -----------------------------------------------------------
 
-app = FastAPI(title='Jigsaw Models API')
+app = FastAPI(title="Jigsaw Toxic Rule Violation – API")
 
-# Allow CORS for local development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['*'],
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
     allow_credentials=True,
-    allow_methods=['*'],
-    allow_headers=['*'],
 )
 
+# -----------------------------------------------------------
+# MODEL REGISTRY
+# -----------------------------------------------------------
 
-def find_model_files(directory: Path) -> Dict[str, Path]:
-    files = {}
-    if not directory.exists():
-        return files
-    for p in directory.glob('*.joblib'):
-        name = p.stem
-        files[name] = p
-    return files
+MODEL_REGISTRY: Dict[str, Any] = {}
+MODEL_METADATA: Dict[str, Any] = {}
 
-
-def load_metadata(directory: Path) -> Dict[str, Any]:
-    meta = {}
-    if not directory.exists():
-        return meta
-    for p in directory.glob('*_metadata.json'):
-        try:
-            with open(p, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            key = p.stem.replace('_metadata', '')
-            meta[key] = data
-        except Exception:
-            continue
-    return meta
-
-
-_MODEL_REGISTRY: Dict[str, Any] = {}
-_METADATA: Dict[str, Any] = {}
-
+# -----------------------------------------------------------
+# LOAD MODELS SAFELY
+# -----------------------------------------------------------
 
 def safe_load_models():
-    global _MODEL_REGISTRY, _METADATA
-    _MODEL_REGISTRY = {}
-    model_files = find_model_files(MODELS_DIR)
-    for name, path in model_files.items():
-        try:
-            _MODEL_REGISTRY[name] = joblib.load(path)
-        except Exception:
-            _MODEL_REGISTRY[name] = None
-    _METADATA = load_metadata(MODELS_DIR)
+    global MODEL_REGISTRY, MODEL_METADATA
+    MODEL_REGISTRY = {}
+    MODEL_METADATA = {}
 
+    print("\n=== CARGANDO MODELOS ===")
 
-import json
-import joblib
-import tensorflow as tf
-from transformers import AutoTokenizer
-from pathlib import Path
-
-def safe_load_models2():
-    global _MODEL_REGISTRY, _METADATA
-    _MODEL_REGISTRY = {}
-    _METADATA = {}
-
-    # Buscar carpetas dentro de MODELS_DIR
-    for model_dir in Path(MODELS_DIR).glob("*"):
-        if not model_dir.is_dir():
+    for folder in MODELS_DIR.iterdir():
+        if not folder.is_dir():
             continue
 
-        name = model_dir.name
-        model_info = {}
+        name = folder.name
+        print(f"\n-> Cargando: {name}")
 
-        # --- 1. Cargar metadata.json ---
-        meta_path = model_dir / "metadata.json"
-        if meta_path.exists():
+        info: Dict[str, Any] = {
+            "type": None,
+            "model": None,
+            "tokenizer": None,
+            "input_keys": None,
+            "seq_len": None,
+        }
+
+        # ---- metadata.json ----
+        metadata_path = folder / "metadata.json"
+        if metadata_path.exists():
             try:
-                with open(meta_path, "r", encoding="utf8") as f:
-                    model_info["metadata"] = json.load(f)
-            except:
-                model_info["metadata"] = None
+                MODEL_METADATA[name] = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except Exception:
+                MODEL_METADATA[name] = None
 
-        # --- 2. Cargar modelo .joblib (model.pkl, model.joblib, etc.) ---
-        joblib_files = list(model_dir.glob("*.joblib")) + list(model_dir.glob("*.pkl"))
+        # ---- modelos sklearn (.joblib) ----
+        joblib_files = list(folder.glob("*.joblib")) + list(folder.glob("*.pkl"))
         if joblib_files:
             try:
-                model_info["model"] = joblib.load(joblib_files[0])
-                model_info["type"] = "joblib"
-            except:
-                model_info["model"] = None
+                info["model"] = joblib.load(joblib_files[0])
+                info["type"] = "sklearn"
+                MODEL_REGISTRY[name] = info
+                print("   ✓ sklearn cargado")
+            except Exception as e:
+                print("   ✗ ERROR cargando sklearn:", e)
+            continue
 
-        # --- 3. Cargar modelo TensorFlow (.keras) ---
-        keras_files = list(model_dir.glob("*.keras"))
-        if keras_files:
+        # ---- BiLSTM deshabilitado ----
+        if name == "models_bilstm":
+            print("   ✗ BiLSTM deshabilitado (Lambda sin output_shape)")
+            continue
+
+        # ---- TensorFlow SavedModel ----
+        saved_model_path = folder / "saved_model.pb"
+        if saved_model_path.exists():
             try:
-                model_info["model"] = tf.keras.models.load_model(keras_files[0], compile=True)
-                model_info["type"] = "tensorflow"
-            except:
-                model_info["model"] = None
+                saved = tf.saved_model.load(str(folder))
+                fn = saved.signatures["serving_default"]
+                input_sig = fn.structured_input_signature[1]
+                input_keys = list(input_sig.keys())
 
-        # --- 4. Cargar tokenizer de HuggingFace ---
-        tokenizer_dir = model_dir / "tokenizer"
-        if tokenizer_dir.exists():
-            try:
-                model_info["tokenizer"] = AutoTokenizer.from_pretrained(tokenizer_dir)
-            except:
-                model_info["tokenizer"] = None
-        else:
-            model_info["tokenizer"] = None
+                # detectar seq_len fija (ej. 160)
+                seq_len = None
+                for spec in input_sig.values():
+                    if len(spec.shape) == 2 and spec.shape[1] is not None:
+                        seq_len = int(spec.shape[1])
+                        break
 
-        # Registrar modelo
-        _MODEL_REGISTRY[name] = model_info
-        _METADATA[name] = model_info.get("metadata", None)
+                info["type"] = "tensorflow"
+                info["model"] = fn
+                info["input_keys"] = input_keys
+                info["seq_len"] = seq_len
 
-    print("Modelos cargados:", list(_MODEL_REGISTRY.keys()))
+                print("   ✓ SavedModel cargado (tf.saved_model.load)")
+                print(f"   · input keys: {input_keys}")
+                if seq_len is not None:
+                    print(f"   · seq_len detectado: {seq_len}")
 
+            except Exception as e:
+                print("   ✗ ERROR cargando SavedModel:", e)
+                continue
 
+            # tokenizer de HuggingFace
+            tok_dir = folder / "tokenizer"
+            if tok_dir.exists():
+                try:
+                    info["tokenizer"] = AutoTokenizer.from_pretrained(tok_dir)
+                    print("   ✓ tokenizer cargado")
+                except Exception as e:
+                    print("   ✗ ERROR cargando tokenizer:", e)
 
-@app.on_event('startup')
+            MODEL_REGISTRY[name] = info
+            continue
+
+    print("\nModelos cargados:", list(MODEL_REGISTRY.keys()))
+    print("=== FIN CARGA ===")
+
+@app.on_event("startup")
 def startup_event():
-    safe_load_models2()
+    safe_load_models()
 
+# -----------------------------------------------------------
+# PREDICCIÓN SKLEARN (versión robusta que usabas antes)
+# -----------------------------------------------------------
 
-def predict_with_pipeline(pipeline, text: str) -> Dict[str, Any]:
+def predict_sklearn(pipeline, text: str) -> Dict[str, Any]:
     try:
-        print(pipeline)
-        # Try predict_proba
-        if hasattr(pipeline, 'predict_proba'):
+        # 1) predict_proba si existe
+        if hasattr(pipeline, "predict_proba"):
             probs = pipeline.predict_proba([text])[0]
         else:
-            # Try decision_function
-            if hasattr(pipeline, 'decision_function'):
+            # 2) decision_function -> lo convertimos a probs
+            if hasattr(pipeline, "decision_function"):
                 df = pipeline.decision_function([text])
                 df = np.array(df)
                 if df.ndim == 1:
@@ -162,19 +171,22 @@ def predict_with_pipeline(pipeline, text: str) -> Dict[str, Any]:
                     exps = np.exp(df[0] - np.max(df[0]))
                     probs = exps / exps.sum()
             else:
+                # 3) fallback: solo predict
                 pred = pipeline.predict([text])[0]
-                classes = getattr(pipeline, 'classes_', None)
+                classes = getattr(pipeline, "classes_", None)
                 if classes is not None:
                     probs = np.zeros(len(classes))
                     probs[list(classes).index(pred)] = 1.0
                 else:
                     probs = np.array([1.0])
 
-        classes = getattr(pipeline, 'classes_', None)
-        if classes is None and hasattr(pipeline, 'named_steps'):
-            for name, step in pipeline.named_steps.items():
-                if hasattr(step, 'classes_'):
+        # obtener classes_ desde el pipeline o algún step interno
+        classes = getattr(pipeline, "classes_", None)
+        if classes is None and hasattr(pipeline, "named_steps"):
+            for _, step in pipeline.named_steps.items():
+                if hasattr(step, "classes_"):
                     classes = step.classes_
+                    break
 
         if isinstance(probs, np.ndarray) and probs.size > 1 and classes is not None:
             idx = int(np.argmax(probs))
@@ -184,80 +196,135 @@ def predict_with_pipeline(pipeline, text: str) -> Dict[str, Any]:
         else:
             label = str(pipeline.predict([text])[0])
             confidence = 1.0
-            probs_list = probs.tolist() if hasattr(probs, 'tolist') else [float(probs)]
-
-        return {'label': label, 'confidence': confidence, 'probs': probs_list}
-    except Exception as e:
-        return {'error': str(e), 'trace': traceback.format_exc()}
-
-
-@app.get('/')
-def index():
-    index_file = STATIC_DIR / 'index.html'
-    if index_file.exists():
-        return FileResponse(index_file)
-    return JSONResponse({'message': 'Index not found. Place a static/index.html file.'}, status_code=404)
-
-
-@app.get('/models')
-def list_models():
-    return {'models': list(_MODEL_REGISTRY.keys()), 'metadata': _METADATA}
-
-
-@app.post('/predict')
-def predict(req: PredictRequest):
-    model_name = req.model or ('LinearSVC' if 'LinearSVC' in _MODEL_REGISTRY else None)
-    if model_name is None:
-        raise HTTPException(status_code=400, detail='No model specified and no default available')
-
-    model_info = _MODEL_REGISTRY.get(model_name)
-    if model_info is None:
-        raise HTTPException(status_code=404, detail=f'Model "{model_name}" not found or failed to loaaaaad')
-
-    model = model_info.get("model")
-    tokenizer = model_info.get("tokenizer")
-    model_type = model_info.get("type")
-
-    if model is None:
-        raise HTTPException(status_code=500, detail=f"Model '{model_name}' failed to loooooad")
-
-    if model_type == "joblib":
-        result = predict_with_pipeline(model, req.text)
-        if 'error' in result:
-            raise HTTPException(status_code=500, detail=result)
-        return {'model': model_name, 'text': req.text, 'result': result}
-
-    if model_type == "tensorflow":
-        if tokenizer is None:
-            raise HTTPException(status_code=500, detail="Tokenizer missing for TensorFlow model")
-
-        inputs = tokenizer(req.text, return_tensors="tf", padding=True, truncation=True)
-        probs = model.predict(inputs)
-        probs = probs[0]
-
-        label_id = int(np.argmax(probs))
-        confidence = float(probs[label_id])
+            probs_list = probs.tolist() if hasattr(probs, "tolist") else [float(probs)]
 
         return {
-            'model': model_name,
-            'text': req.text,
-            'result': {
-                'label': label_id,
-                'confidence': confidence,
-                'probs': probs.tolist()
-            }
+            "label": label,
+            "label_index": int(label) if str(label).isdigit() else 0,
+            "confidence": confidence,
+            "probs": probs_list,
+        }
+    except Exception as e:
+        return {"error": str(e), "trace": traceback.format_exc()}
+
+# -----------------------------------------------------------
+# PREDICCIÓN TENSORFLOW (maneja softmax y sigmoide)
+# -----------------------------------------------------------
+
+def predict_tensorflow(fn, tokenizer, input_keys, seq_len, text: str) -> Dict[str, Any]:
+    try:
+        # tokenización con longitud fija si el modelo la tiene
+        if seq_len is not None:
+            enc = tokenizer(
+                text,
+                return_tensors="tf",
+                padding="max_length",
+                truncation=True,
+                max_length=seq_len,
+            )
+        else:
+            enc = tokenizer(
+                text,
+                return_tensors="tf",
+                padding=True,
+                truncation=True,
+            )
+
+        enc_dict = {k: v for k, v in enc.items()}
+        inputs_tf = {k: enc_dict[k] for k in input_keys if k in enc_dict}
+
+        outputs = fn(**inputs_tf)
+
+        # primera salida
+        if "logits" in outputs:
+            raw = outputs["logits"].numpy()
+        else:
+            raw = list(outputs.values())[0].numpy()
+
+        raw = np.array(raw)
+
+        # ---- caso sigmoide: salida [batch] o [batch, 1] ----
+        if raw.ndim == 1 or (raw.ndim == 2 and raw.shape[1] == 1):
+            if raw.ndim == 2:
+                v = float(raw[0, 0])
+            else:
+                v = float(raw[0])
+
+            # si ya está en [0,1] lo tomamos tal cual, si no aplicamos sigmoide
+            if 0.0 <= v <= 1.0:
+                p1 = v
+            else:
+                p1 = float(tf.sigmoid(v).numpy())
+
+            p0 = 1.0 - p1
+            probs = np.array([p0, p1], dtype=np.float32)
+
+        # ---- caso softmax: [batch, num_classes] ----
+        else:
+            probs = tf.nn.softmax(raw, axis=-1).numpy()[0]
+
+        idx = int(np.argmax(probs))
+
+        return {
+            "label": str(idx),
+            "label_index": idx,
+            "confidence": float(probs[idx]),
+            "probs": probs.tolist(),
         }
 
-    raise HTTPException(status_code=500, detail="Unsupported model type")
+    except Exception as e:
+        return {"error": str(e), "trace": traceback.format_exc()}
 
+# -----------------------------------------------------------
+# ROUTES
+# -----------------------------------------------------------
 
+@app.get("/")
+def index():
+    index_file = STATIC_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    return JSONResponse({"message": "Place static/index.html"}, status_code=404)
 
-# Mount static files
+@app.get("/models")
+def list_models():
+    return {"models": list(MODEL_REGISTRY.keys()), "metadata": MODEL_METADATA}
+
+@app.post("/predict")
+def predict(req: PredictRequest):
+    if not req.model:
+        raise HTTPException(400, "Debes seleccionar un modelo")
+
+    if req.model not in MODEL_REGISTRY:
+        raise HTTPException(404, f"Modelo '{req.model}' no encontrado")
+
+    info = MODEL_REGISTRY[req.model]
+
+    # sklearn
+    if info["type"] == "sklearn":
+        result = predict_sklearn(info["model"], req.text)
+        if "error" in result:
+            raise HTTPException(500, result)
+        return {"model": req.model, "result": result}
+
+    # TensorFlow
+    if info["type"] == "tensorflow":
+        result = predict_tensorflow(
+            fn=info["model"],
+            tokenizer=info["tokenizer"],
+            input_keys=info["input_keys"],
+            seq_len=info["seq_len"],
+            text=req.text,
+        )
+        if "error" in result:
+            raise HTTPException(500, result)
+        return {"model": req.model, "result": result}
+
+    raise HTTPException(500, "Tipo de modelo no soportado")
+
+# -----------------------------------------------------------
+# STATIC
+# -----------------------------------------------------------
+
 if STATIC_DIR.exists():
-    app.mount('/static', StaticFiles(directory=str(STATIC_DIR)), name='static')
-
-
-if __name__ == '__main__':
-    import uvicorn
-
-    uvicorn.run('api:app', host='0.0.0.0', port=8000, reload=True)
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
