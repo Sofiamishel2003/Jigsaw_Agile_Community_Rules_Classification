@@ -54,6 +54,13 @@ MODEL_METADATA: Dict[str, Any] = {}
 # LOAD MODELS SAFELY
 # -----------------------------------------------------------
 
+def _has_files(p: Path) -> bool:
+    try:
+        return p.exists() and any(p.iterdir())
+    except Exception:
+        return False
+
+
 def safe_load_models():
     global MODEL_REGISTRY, MODEL_METADATA
     MODEL_REGISTRY = {}
@@ -96,7 +103,7 @@ def safe_load_models():
                 print("   ✗ ERROR cargando sklearn:", e)
             continue
 
-        # ---- BiLSTM deshabilitado ----
+        # ---- BiLSTM deshabilitado (mantener por ahora) ----
         if name == "models_bilstm":
             print("   ✗ BiLSTM deshabilitado (Lambda sin output_shape)")
             continue
@@ -131,14 +138,20 @@ def safe_load_models():
                 print("   ✗ ERROR cargando SavedModel:", e)
                 continue
 
-            # tokenizer de HuggingFace
+            # tokenizer de HuggingFace (solo si existe y no está vacío)
             tok_dir = folder / "tokenizer"
-            if tok_dir.exists():
+            if _has_files(tok_dir):
                 try:
-                    info["tokenizer"] = AutoTokenizer.from_pretrained(tok_dir)
+                    info["tokenizer"] = AutoTokenizer.from_pretrained(
+                        str(tok_dir),
+                        local_files_only=True,
+                    )
                     print("   ✓ tokenizer cargado")
                 except Exception as e:
                     print("   ✗ ERROR cargando tokenizer:", e)
+            else:
+                print("   ✗ tokenizer no encontrado o vacío -> modelo omitido")
+                continue
 
             MODEL_REGISTRY[name] = info
             continue

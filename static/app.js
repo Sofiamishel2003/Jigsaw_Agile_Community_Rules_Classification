@@ -51,18 +51,43 @@ async function loadModels(){
       const fallbackColor = PALETTE[idx % PALETTE.length];
       // populate if we have any metric info or at least metadata
       if(met && (met.f1 !== undefined || met.accuracy !== undefined || met.precision !== undefined || met.recall !== undefined || met.auc !== undefined || md)){
+        const cm = (met.confusion_matrix ?? met.confusionMatrix ?? md.confusion_matrix ?? md.confusionMatrix ?? modelsData[name]?.confusion_matrix ?? null);
+        // derive missing metrics from confusion matrix if possible (format [[TN,FP],[FN,TP]])
+        let derived = {};
+        if(cm && Array.isArray(cm) && cm.length===2 && Array.isArray(cm[0]) && Array.isArray(cm[1]) && cm[0].length===2 && cm[1].length===2){
+          const TN = Number(cm[0][0]);
+          const FP = Number(cm[0][1]);
+          const FN = Number(cm[1][0]);
+          const TP = Number(cm[1][1]);
+          const total = TN+FP+FN+TP;
+          const precisionCalc = TP + FP > 0 ? TP/(TP+FP) : 0;
+          const recallCalc = TP + FN > 0 ? TP/(TP+FN) : 0;
+          const accuracyCalc = total > 0 ? (TP+TN)/total : 0;
+          const f1Calc = (precisionCalc+recallCalc)>0 ? (2*precisionCalc*recallCalc)/(precisionCalc+recallCalc) : 0;
+          derived = {precisionCalc, recallCalc, accuracyCalc, f1Calc};
+        }
+        // soportar claves alternativas para accuracy (acc, Accuracy)
+        const accValue = (met.accuracy ?? met.acc ?? met.Accuracy ?? modelsData[name]?.accuracy ?? derived.accuracyCalc ?? 0);
         modelsData[name] = {
-          f1: (met.f1 ?? modelsData[name]?.f1 ?? 0),
-          accuracy: (met.accuracy ?? modelsData[name]?.accuracy ?? 0),
-          precision: (met.precision ?? modelsData[name]?.precision ?? 0),
-          recall: (met.recall ?? modelsData[name]?.recall ?? 0),
+          f1: (met.f1 ?? modelsData[name]?.f1 ?? derived.f1Calc ?? 0),
+          accuracy: accValue,
+          precision: (met.precision ?? modelsData[name]?.precision ?? derived.precisionCalc ?? 0),
+          recall: (met.recall ?? modelsData[name]?.recall ?? derived.recallCalc ?? 0),
           auc: (met.auc ?? modelsData[name]?.auc ?? 0),
           color: (md.color ?? modelsData[name]?.color ?? fallbackColor),
           description: (md.description ?? modelsData[name]?.description ?? ''),
           classes: (met.classes ?? md.classes ?? modelsData[name]?.classes ?? []),
-          confusion_matrix: (met.confusion_matrix ?? met.confusionMatrix ?? md.confusion_matrix ?? md.confusionMatrix ?? modelsData[name]?.confusion_matrix ?? null),
+          confusion_matrix: cm,
           n_val: ((met.n_val ?? met.n) ?? (md.n_val ?? md.n) ?? modelsData[name]?.n_val ?? null)
         };
+        // debug log para verificar métricas cargadas
+        console.log('[loadModels] métricas', name, {
+          f1: modelsData[name].f1,
+          accuracy: modelsData[name].accuracy,
+          precision: modelsData[name].precision,
+          recall: modelsData[name].recall,
+          auc: modelsData[name].auc
+        });
       }
     });
     availableModels = models;
@@ -322,12 +347,15 @@ function renderComparison(){
 
   const theta = ['Precision','Recall','F1','Accuracy','AUC'];
   const radarTraces = modelOrder.map(name => ({
+    type: 'scatterpolar',
     r: [modelsData[name].precision, modelsData[name].recall, modelsData[name].f1, modelsData[name].accuracy, modelsData[name].auc].map(v=>v||0),
     theta: theta,
     fill: 'toself',
-    name: name
+    name: name,
+    hovertemplate: '%{text}: %{r:.2f}<extra></extra>',
+    text: ['Precision','Recall','F1','Accuracy','AUC']
   }));
-  Plotly.newPlot('radarChart', radarTraces, {polar:{radialaxis:{range:[0,1]}}, margin:{t:30}}, {displayModeBar:false,responsive:true});
+  Plotly.newPlot('radarChart', radarTraces, {polar:{radialaxis:{range:[0,1],tickformat:'.0%'}}, margin:{t:30}}, {displayModeBar:false,responsive:true});
 
   // Donut averages + target bars with new theme colors
   buildDonutSmall('avgF1','F1', avg('f1'), METRIC_COLORS.f1);
@@ -396,12 +424,15 @@ function updateComparisonCharts(metric, metrics, metricNames){
   // radar
   const theta = ['Precision','Recall','F1','Accuracy','AUC'];
   const radarTraces = modelOrder.map(name => ({
+    type: 'scatterpolar',
     r: [modelsData[name].precision, modelsData[name].recall, modelsData[name].f1, modelsData[name].accuracy, modelsData[name].auc].map(v=>v||0),
     theta: theta,
     fill: 'toself',
-    name: name
+    name: name,
+    hovertemplate: '%{text}: %{r:.2f}<extra></extra>',
+    text: ['Precision','Recall','F1','Accuracy','AUC']
   }));
-  Plotly.react('radarChart', radarTraces, {polar:{radialaxis:{range:[0,1]}}, margin:{t:30}});
+  Plotly.react('radarChart', radarTraces, {polar:{radialaxis:{range:[0,1],tickformat:'.0%'}}, margin:{t:30}});
 
   // heatmap
   const z = modelOrder.map(name => metrics.map(m => (modelsData[name] && modelsData[name][m]) ? +(modelsData[name][m]) : 0));
@@ -514,13 +545,39 @@ function renderPredict(){
     let statusColor = baseColor;
     let statusChipClass = 'chip';
     if((classes && classes.length===2) || (Array.isArray(r.probs) && r.probs.length===2)){
-      // assume index 1 = positivo
-      const labelIdx = (typeof r.label === 'number') ? r.label : (classes.indexOf(String(r.label)));
+      // determinar índice real de la etiqueta (soporta '0'/'1' como string)
+      let labelIdx;
+      if(typeof r.label === 'number') {
+        labelIdx = r.label;
+      } else if(r.label === '0' || r.label === '1') {
+        labelIdx = parseInt(r.label, 10);
+      } else {
+        labelIdx = classes.indexOf(String(r.label));
+      }
+      // si no se puede inferir, usar probs
+      if((labelIdx === -1 || isNaN(labelIdx)) && Array.isArray(r.probs) && r.probs.length === 2){
+        labelIdx = (r.probs[1] >= r.probs[0]) ? 1 : 0;
+      }
       if(labelIdx === 1){ statusColor = '#ef4444'; statusChipClass = 'chip chip-red'; }
       else { statusColor = '#10b981'; statusChipClass = 'chip chip-green'; }
     }
     const barColor = shadeColor(statusColor, Math.min(30, Math.max(-20, (percent-50)/2)));
     const donutId = `pred-donut-${(item.model||'m').toString().replace(/[^a-zA-Z0-9_-]/g,'-')}-${RESULT_COUNTER++}`;
+
+    // métricas agregadas del modelo (precargadas en modelsData)
+    const agg = modelsData[item.model] || {};
+    const metricRow = el('div',{class:'result-metrics'},[
+      buildMetricChip('F1', agg.f1),
+      buildMetricChip('Acc', agg.accuracy),
+      buildMetricChip('Prec', agg.precision),
+      buildMetricChip('Rec', agg.recall)
+    ]);
+
+    function buildMetricChip(label, val){
+      const txt = (val!==undefined && val!==null) ? (val*100).toFixed(1)+'%' : '—';
+      return el('div',{class:'metric-chip'},[ el('span',{class:'metric-chip-label'},[label]), el('span',{class:'metric-chip-value'},[txt]) ]);
+    }
+
     const cardEl = el('div',{class:'result-card', style:`border-left:6px solid ${statusColor}`},[
       el('div',{class:'result-main'},[
         el('div',{class:'model-info'},[
@@ -528,6 +585,7 @@ function renderPredict(){
             el('div',{class:'model-name'},[item.model]),
             el('div',{class:'model-time'},[`${item.ms}ms`])
           ]),
+          metricRow,
           el('div',{class:'prediction-label'},[ String(labelText) ]),
           el('div',{class:'confidence-row'},[
             el('div',{class:'conf-perc'},[ `${percent}%` ]),

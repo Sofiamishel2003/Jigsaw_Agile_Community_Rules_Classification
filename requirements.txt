@@ -1,0 +1,8 @@
+fastapi>=0.95.2
+uvicorn[standard]>=0.22.0
+scikit-learn>=1.2.0
+joblib>=1.2.0
+numpy==1.26.4
+tensorflow==2.15.0
+keras==2.15.0
+transformers==4.37.2
