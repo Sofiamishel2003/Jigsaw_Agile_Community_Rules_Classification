@@ -19,9 +19,9 @@ python -m venv .venv
 pip install fastapi uvicorn joblib scikit-learn plotly
 ```
 
-Si ya tienes un archivo `requirements.txt`, puedes sustituir el paso 3 por:
+Si ya tienes un archivo `api_requirements.txt`, puedes sustituir el paso 3 por:
 ```powershell
-pip install -r requirements.txt
+pip install -r api_requirements.txt
 ```
 
 ### Ejecutar la UI
