@@ -4,19 +4,19 @@
   "path": "bilstm_attention_model",
   "description": "Neural network with BiLSTM + Attention + EarlyStopping",
   "metrics": {
-    "accuracy": 0.6847290640394089,
-    "f1": 0.7217391304347827,
-    "precision": 0.6535433070866141,
-    "recall": 0.8058252427184466,
-    "auc": 0.7739199029126214,
+    "accuracy": 0.7561576354679803,
+    "f1": 0.7785234899328859,
+    "precision": 0.7219917012448133,
+    "recall": 0.8446601941747572,
+    "auc": 0.8178762135922331,
     "confusion_matrix": [
       [
-        112,
-        88
+        133,
+        67
       ],
       [
-        40,
-        166
+        32,
+        174
       ]
     ],
     "n_val": 406

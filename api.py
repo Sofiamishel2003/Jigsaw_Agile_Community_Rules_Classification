@@ -75,13 +75,78 @@ def safe_load_models():
     _METADATA = load_metadata(MODELS_DIR)
 
 
+import json
+import joblib
+import tensorflow as tf
+from transformers import AutoTokenizer
+from pathlib import Path
+
+def safe_load_models2():
+    global _MODEL_REGISTRY, _METADATA
+    _MODEL_REGISTRY = {}
+    _METADATA = {}
+
+    # Buscar carpetas dentro de MODELS_DIR
+    for model_dir in Path(MODELS_DIR).glob("*"):
+        if not model_dir.is_dir():
+            continue
+
+        name = model_dir.name
+        model_info = {}
+
+        # --- 1. Cargar metadata.json ---
+        meta_path = model_dir / "metadata.json"
+        if meta_path.exists():
+            try:
+                with open(meta_path, "r", encoding="utf8") as f:
+                    model_info["metadata"] = json.load(f)
+            except:
+                model_info["metadata"] = None
+
+        # --- 2. Cargar modelo .joblib (model.pkl, model.joblib, etc.) ---
+        joblib_files = list(model_dir.glob("*.joblib")) + list(model_dir.glob("*.pkl"))
+        if joblib_files:
+            try:
+                model_info["model"] = joblib.load(joblib_files[0])
+                model_info["type"] = "joblib"
+            except:
+                model_info["model"] = None
+
+        # --- 3. Cargar modelo TensorFlow (.keras) ---
+        keras_files = list(model_dir.glob("*.keras"))
+        if keras_files:
+            try:
+                model_info["model"] = tf.keras.models.load_model(keras_files[0], compile=True)
+                model_info["type"] = "tensorflow"
+            except:
+                model_info["model"] = None
+
+        # --- 4. Cargar tokenizer de HuggingFace ---
+        tokenizer_dir = model_dir / "tokenizer"
+        if tokenizer_dir.exists():
+            try:
+                model_info["tokenizer"] = AutoTokenizer.from_pretrained(tokenizer_dir)
+            except:
+                model_info["tokenizer"] = None
+        else:
+            model_info["tokenizer"] = None
+
+        # Registrar modelo
+        _MODEL_REGISTRY[name] = model_info
+        _METADATA[name] = model_info.get("metadata", None)
+
+    print("Modelos cargados:", list(_MODEL_REGISTRY.keys()))
+
+
+
 @app.on_event('startup')
 def startup_event():
-    safe_load_models()
+    safe_load_models2()
 
 
 def predict_with_pipeline(pipeline, text: str) -> Dict[str, Any]:
     try:
+        print(pipeline)
         # Try predict_proba
         if hasattr(pipeline, 'predict_proba'):
             probs = pipeline.predict_proba([text])[0]
@@ -144,14 +209,47 @@ def predict(req: PredictRequest):
     model_name = req.model or ('LinearSVC' if 'LinearSVC' in _MODEL_REGISTRY else None)
     if model_name is None:
         raise HTTPException(status_code=400, detail='No model specified and no default available')
-    model = _MODEL_REGISTRY.get(model_name)
-    if model is None:
-        raise HTTPException(status_code=404, detail=f'Model "{model_name}" not found or failed to load')
 
-    result = predict_with_pipeline(model, req.text)
-    if 'error' in result:
-        raise HTTPException(status_code=500, detail=result)
-    return {'model': model_name, 'text': req.text, 'result': result}
+    model_info = _MODEL_REGISTRY.get(model_name)
+    if model_info is None:
+        raise HTTPException(status_code=404, detail=f'Model "{model_name}" not found or failed to loaaaaad')
+
+    model = model_info.get("model")
+    tokenizer = model_info.get("tokenizer")
+    model_type = model_info.get("type")
+
+    if model is None:
+        raise HTTPException(status_code=500, detail=f"Model '{model_name}' failed to loooooad")
+
+    if model_type == "joblib":
+        result = predict_with_pipeline(model, req.text)
+        if 'error' in result:
+            raise HTTPException(status_code=500, detail=result)
+        return {'model': model_name, 'text': req.text, 'result': result}
+
+    if model_type == "tensorflow":
+        if tokenizer is None:
+            raise HTTPException(status_code=500, detail="Tokenizer missing for TensorFlow model")
+
+        inputs = tokenizer(req.text, return_tensors="tf", padding=True, truncation=True)
+        probs = model.predict(inputs)
+        probs = probs[0]
+
+        label_id = int(np.argmax(probs))
+        confidence = float(probs[label_id])
+
+        return {
+            'model': model_name,
+            'text': req.text,
+            'result': {
+                'label': label_id,
+                'confidence': confidence,
+                'probs': probs.tolist()
+            }
+        }
+
+    raise HTTPException(status_code=500, detail="Unsupported model type")
+
 
 
 # Mount static files
